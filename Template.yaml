@@ -1,0 +1,560 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  sam-bot
+
+  Sample SAM Template for sam-app
+
+Parameters:
+  RekognitionModel:
+    Description: Put here your rekognition custom model
+    Type: String
+    Default: arn:aws:rekognition:us-east-1:xxxxx:xxxxx/xxxxx/version/xxxxxx
+    
+  LexBotName:
+    Description: Default lex bot name
+    Type: String
+    Default: OctankBot
+  
+  LexBotAlias:
+    Description: Default lex bot alias
+    Type: String
+    Default: dev
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+    MemorySize: 128
+
+Resources:
+  carRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaDynamoDBExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole'
+      RoleName: carRole
+      
+  LexSlr:
+    Type: 'AWS::IAM::ServiceLinkedRole'
+    Properties:
+      AWSServiceName: lex.amazonaws.com
+      Description: SLR for lex
+   
+  carInsuranceBot:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      Handler: index.lambda_handler
+      Timeout: 30
+      Runtime: python3.7
+      Policies:
+      - Version: '2012-10-17' # Policy Document
+        Statement:
+          - Effect: Allow
+            Action:
+              - lex:PostText
+            Resource: !Sub 'arn:aws:lex:*:*:bot:${LexBotName}:*'
+      - Version: '2012-10-17' # Policy Document
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt InsuranceQueue.Arn           
+      - S3CrudPolicy:
+          BucketName: !Ref S3Bucket
+      - DynamoDBCrudPolicy:
+          TableName: !Ref DynamoTable
+      - DynamoDBCrudPolicy:    
+          TableName: !Ref DynamoInsuranceResults
+      Environment:
+        Variables:
+          BOT_ALIAS: !Ref LexBotAlias
+          BOT_NAME: !Ref LexBotName
+          RESULTS_TABLE: !Ref DynamoInsuranceResults
+          S3_BUCKET_NAME: !Ref S3Bucket
+          SQS_URL: !Ref InsuranceQueue
+          TABLE_NAME: !Ref DynamoTable
+      Architectures:
+        - x86_64
+      Events:
+        GetResultsInsuranceApi:
+          Type: HttpApi # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /getResults
+            Method: get
+        UploadImageInsuranceApi:
+          Type: HttpApi # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /uploadImage
+            Method: post
+        SendMessageInsuranceApi:
+          Type: HttpApi # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /sendMessage
+            Method: post 
+      InlineCode: |
+        import json
+        import uuid
+        import base64
+        from io import BytesIO
+        from datetime import datetime, timezone
+        import os
+        import boto3
+        from boto3.dynamodb.conditions import Key, Attr
+        from io import BytesIO
+        
+        POST_MESSAGE_RAW_PATH = "/sendMessage"
+        POST_IMAGE_RAW_PATH = "/uploadImage"
+        GET_IMAGE_RESULT_PATH = "/getResults"
+        
+        FILES_ACCEPTED = ['image/png', 'image/jpg', 'image/jpeg']
+        
+        class SQS():
+        
+            def __init__(self):
+                self.SQS_URL = os.environ['SQS_URL']
+                self.sqs = boto3.client('sqs')
+                
+            def send_message(self, image_token, s3_prefix):
+                response = self.sqs.send_message(
+                    QueueUrl=self.SQS_URL,
+                    MessageAttributes={
+                        'image_token': {
+                            'DataType': 'String',
+                            'StringValue': image_token,
+                        },
+                        's3_prefix': {
+                            'DataType': 'String',
+                            'StringValue': s3_prefix
+                        }
+                    },
+                    MessageBody=('Photo sent to S3 on prefix: {} '.format(s3_prefix))
+                )
+                return response
+        
+        class S3():
+            
+            def __init__(self):
+                self.s3 = boto3.client('s3')
+                self.S3_BUCKET_NAME = os.environ['S3_BUCKET_NAME']
+            
+            def write_on_s3(self, body, file_key):
+                response = self.s3.put_object(
+                    Bucket=self.S3_BUCKET_NAME,
+                    Body=body,
+                    Key=file_key,
+                    ContentType='image/jpeg'
+                )
+                
+                return response
+        
+        class Lex():
+        
+            def  __init__(self):
+                self.lex = boto3.client('lex-runtime')
+                self.BOT_NAME = os.environ['BOT_NAME']
+                self.BOT_ALIAS = os.environ['BOT_ALIAS']
+                  
+            def send_to_lex(self, chat_id, message):
+                response =  self.lex.post_text(
+                    inputText=message,
+                    userId=chat_id,
+                    botName=self.BOT_NAME,
+                    botAlias=self.BOT_ALIAS,
+                )
+                return response
+                  
+        class DynamoDB():
+                  
+            def __init__(self):
+                self.dynamodb = boto3.resource('dynamodb')
+                self.TABLE_NAME = os.environ['TABLE_NAME']
+                self.RESULTS_TABLE = os.environ['RESULTS_TABLE']
+                  
+            def write_on_dynamo(self, ts, msg_id, msg_type, msg_content, flow):
+                table = self.dynamodb.Table(self.TABLE_NAME)
+                response = table.put_item(
+                    Item={
+                        'ts': ts,
+                        'msg_id': msg_id,
+                        'type': msg_type,
+                        'content': msg_content,
+                        'flow': flow
+                    }
+                )
+                return response
+                      
+            def read_on_dynamo(self, image_token):
+                table = self.dynamodb.Table(self.RESULTS_TABLE)
+                
+                # get item that matches image_token value
+                response = table.get_item(
+                    Key={
+                        'image_token': image_token
+                    }
+                )
+                return response
+          
+        def lambda_handler(event, context):
+            print("Starting Handler")
+            
+            # creates a unique token for each message
+            msg_id = str(uuid.uuid4())
+            
+            if 'rawPath' in event:
+                
+                # /sendMessage
+                if event['rawPath'] == POST_MESSAGE_RAW_PATH:
+                    print("POST_MESSAGE_RAW_PATH")
+                    
+                    decodedBody = json.loads(event['body'])
+                    message_content = decodedBody['text']
+                    
+                    ts = datetime.now().isoformat(timespec='seconds')
+                    
+                    # write log on Dynamo DB RECEIVED
+                    response = DynamoDB().write_on_dynamo(ts, msg_id, 'TEXT', message_content, 'RECEIVED')
+                    print('Dynamo-Received--> ',response)
+                    
+                    # validate intent on Lex
+                    lex_response = Lex().send_to_lex(msg_id, message_content)
+                    response_message = lex_response['message']
+                
+                    ts = datetime.now().isoformat(timespec='seconds')
+                    
+                    # write log on Dynamo DB SENT
+                    response = DynamoDB().write_on_dynamo(ts, msg_id, 'TEXT', response_message, 'SENT')
+                    print('Dynamo-Sent--> ', response)
+                    
+                    return {
+                        'statusCode': 200,
+                        'body': response_message
+                      
+                    }
+                
+                # /getResults
+                elif event['rawPath'] == GET_IMAGE_RESULT_PATH:
+                    print("GET_IMAGE_RESULT_PATH")
+                    
+                    decodedBody = json.loads(event['body'])
+                    received_image_token = str(decodedBody['image_token'])
+                    
+                    # reads result from Dynamo DB
+                    response = DynamoDB().read_on_dynamo(received_image_token)
+                    
+                    # returns the message content (result) Item for the provided image token
+                    response_message = response['Item']['content']
+                    
+                    ts = datetime.now().isoformat(timespec='seconds')
+                    
+                    # write log on Dynamo DB SENT
+                    response = DynamoDB().write_on_dynamo(ts, msg_id, 'TEXT', response_message, 'SENT')
+                    print('Dynamo-Sent--> ', response)
+                    
+                    return {
+                        'statusCode': 200,
+                        'body': response_message
+                    }
+                    
+                # /uploadImage
+                elif event['rawPath'] == POST_IMAGE_RAW_PATH:
+                    print("POST_IMAGE_RAW_PATH")
+                    
+                    body = event['body']
+                    headers = event['headers']
+                    
+                    content_type = headers.get('content-type')
+                    
+                    # validates if file has an accepted extension
+                    if not content_type in FILES_ACCEPTED:
+                        response_message = "Tipo de arquivo não aceito!"
+                        
+                        ts = datetime.now().isoformat(timespec='seconds')
+                        
+                        # write log on Dynamo DB SENT
+                        response = DynamoDB().write_on_dynamo(ts, msg_id, 'TEXT', response_message, 'SENT')
+                        print('Dynamo-Sent--> ', response)
+                    
+                        return {
+                            'statusCode': 200,
+                            'body': response_message
+                        }
+                    
+                    # decoding binary base64 image
+                    image = base64.b64decode(body)
+                    
+                    # creates a unique token for get image results
+                    image_token = str(uuid.uuid4())
+                    
+                    ts = datetime.now().isoformat(timespec='seconds')
+                    file_key = ts + '_' + image_token + '.jpg'
+                    
+                    # store image received on s3
+                    response = S3().write_on_s3(image, file_key)
+                    
+                    # send to SQS
+                    queue_response = SQS().send_message(image_token, file_key)
+                 
+                    response_message = 'Recebemos sua imagem e estamos analisando!' + ' Recupere o resultado com o código: ' + image_token
+                    
+                    # write log on Dynamo DB SENT
+                    response = DynamoDB().write_on_dynamo(ts, msg_id, 'TEXT', response_message, 'SENT')
+                    print('Dynamo-Sent--> ', response)
+                    
+                    return {
+                        'statusCode': 200,
+                        'body': response_message
+                    }
+
+
+  carInsuranceImageProcess:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      Handler: index.lambda_handler
+      Timeout: 30
+      Runtime: python3.7
+      Policies:
+      - S3CrudPolicy:
+          BucketName: !Ref S3Bucket
+      - DynamoDBCrudPolicy:
+          TableName: !Ref DynamoTable
+      - DynamoDBCrudPolicy:          
+          TableName: !Ref DynamoInsuranceResults
+      - Version: '2012-10-17' # Policy Document
+        Statement:
+          - Effect: Allow
+            Action:
+              - rekognition:DetectCustomLabels
+            Resource: !Ref RekognitionModel
+      - Version: '2012-10-17' # Policy Document
+        Statement:
+          - Effect: Allow
+            Action:
+              - translate:TranslateText
+            Resource: '*'
+      Environment:
+        Variables:
+          BOT_ALIAS: !Ref LexBotAlias
+          BOT_NAME: !Ref LexBotName
+          RESULTS_TABLE: !Ref DynamoInsuranceResults
+          S3_BUCKET_NAME: !Ref S3Bucket
+          SQS_URL: !Ref InsuranceQueue
+          TABLE_NAME: !Ref DynamoTable
+          REKOGNITION_MODEL: !Ref RekognitionModel
+      Architectures:
+        - x86_64
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt InsuranceQueue.Arn
+      InlineCode: |
+        import json, os, boto3
+        from datetime import datetime, timezone
+        from io import BytesIO
+        
+        class Translate():
+        
+            def __init__(self):
+                self.client = boto3.client('translate')
+        
+            def get_portuguese_text(self, txt):
+                response = self.client.translate_text(
+                    Text=txt,
+                    SourceLanguageCode='en',
+                    TargetLanguageCode='pt'
+                )
+        
+                return response['TranslatedText']
+        
+        class S3():
+            
+            def __init__(self):
+                self.s3 = boto3.client('s3')
+                self.S3_BUCKET_NAME = os.environ['S3_BUCKET_NAME']
+        
+            def read_from_s3(self, file_key):
+                response = self.s3.get_object(
+                    Bucket=self.S3_BUCKET_NAME,
+                    Key=file_key
+                )
+        
+                ret = BytesIO(response['Body'].read())
+                return ret
+        
+        class Rekognition():
+                def __init__(self):
+                    self.client = boto3.client('rekognition')
+                    self.S3_BUCKET_NAME = os.environ['S3_BUCKET_NAME']
+                    self.REKOGNITION_MODEL = os.environ['REKOGNITION_MODEL']
+        
+                def get_prediction(self, s3_prefix):
+                    
+                    image = S3().read_from_s3(s3_prefix)
+                    
+                    prediction = self.client.detect_custom_labels(Image={'S3Object': {'Bucket': self.S3_BUCKET_NAME, 'Name': s3_prefix}},
+                        # MinConfidence=min_confidence,
+                        ProjectVersionArn=self.REKOGNITION_MODEL)
+                
+                    return prediction
+                
+        
+        class DynamoDB():
+        
+            def __init__(self):
+                self.dynamodb = boto3.resource('dynamodb')
+                self.RESULTS_TABLE = os.environ['RESULTS_TABLE']
+                
+            def write_on_dynamo(self, image_token, ts, msg_content):
+                table = self.dynamodb.Table(self.RESULTS_TABLE)
+                response = table.put_item(
+                    Item={
+                        'image_token': image_token,
+                        'ts': ts,
+                        'content': msg_content
+                    }
+                )
+                return response
+        
+        def lambda_handler(event, context):
+                print("Starting Handler")
+            
+                try:
+                    msg_list = event['Records']
+                    
+                    for sqs_msg in msg_list:
+                        # setting main variables (some from SQS)
+                        attributes = sqs_msg['messageAttributes']
+                        
+                        image_token = attributes['image_token']['stringValue']
+                        s3_prefix = attributes['s3_prefix']['stringValue']
+                    
+                    ts = datetime.now().isoformat(timespec='seconds')
+                    
+                    # getting prediction from rekognition
+                    prediction = Rekognition().get_prediction(s3_prefix)
+                    values_prediction = prediction['CustomLabels']
+                    
+                    if not prediction['CustomLabels']:
+                        response_message = 'Desculpe, não conseguimos fazer a análise. Tente enviar a imagem novamente!'
+                        
+                        # write response on Dynamo DB SENT
+                        response = DynamoDB().write_on_dynamo(image_token, ts, response_message)
+                        print('Dynamo-Sent--> ', response)
+                        
+                        return {
+                            'statusCode': 200,
+                            'body': response_message
+                        }
+                    
+                    prediction_name = values_prediction[0]["Name"]
+                    prediction_confidence = values_prediction[0]["Confidence"]
+                    
+                    translated_pred = Translate().get_portuguese_text(prediction_name.lower())
+                    
+                    response_message = 'Foi detectado: {} com probabilidade de {}. Confirma?'.format(
+                        translated_pred, round(prediction_confidence, 2)
+                    )
+                    
+                    # write response on Dynamo DB SENT
+                    response = DynamoDB().write_on_dynamo(image_token, ts, response_message)
+                    print('Dynamo-Sent--> ', response)
+                    
+                    return {
+                        'statusCode': 200,
+                        'body': response_message
+                    }
+                    
+                except Exception as err:
+                    print('Main error->', err)
+                    return {
+                        'statusCode': 400,
+                        'body': err
+                    }
+
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "ts"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "ts"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName: InsuranceBot
+      
+  DynamoInsuranceResults:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "image_token"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "image_token"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName: InsuranceResults
+      
+  InsuranceQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: CarInsuranceQueue
+  
+  SQSPolicy: 
+    Type: AWS::SQS::QueuePolicy
+    Properties: 
+      Queues: 
+        - !Ref InsuranceQueue
+      PolicyDocument: 
+        Statement: 
+          - 
+            Action: 
+              - "SQS:SendMessage" 
+              - "SQS:ReceiveMessage"
+            Effect: "Allow"
+            Resource: 
+              - !GetAtt carInsuranceBot.Arn
+              - !GetAtt carInsuranceImageProcess.Arn
+  
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: insurance-images-octank
+
+Outputs:
+    
+  carInsuranceBot :
+    Description: "App"
+    Value: !GetAtt carInsuranceBot.Arn
+  
+  carInsuranceImageProcess:
+    Description: "Process message in queue"
+    Value: !GetAtt carInsuranceImageProcess.Arn
+    
+  QueueName:
+    Description: "The name of the queue"
+    Value: !GetAtt InsuranceQueue.QueueName
+  
+  S3Bucket:
+    Description: "s3 bucket where image will be saved"
+    Value: !GetAtt S3Bucket.WebsiteURL
+    
+  LexSlr:
+    Value: !Ref LexSlr   

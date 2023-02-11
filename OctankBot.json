@@ -1,0 +1,203 @@
+{
+  "metadata": {
+    "schemaVersion": "1.0",
+    "importType": "LEX",
+    "importFormat": "JSON"
+  },
+  "resource": {
+    "name": "OctankBot",
+    "version": "18",
+    "intents": [
+      {
+        "name": "ConfirmationIntent",
+        "version": "6",
+        "fulfillmentActivity": {
+          "type": "ReturnIntent"
+        },
+        "sampleUtterances": [
+          "Sim",
+          "Confirmo",
+          "Confirmado"
+        ],
+        "slots": [],
+        "conclusionStatement": {
+          "messages": [
+            {
+              "groupNumber": 1,
+              "contentType": "PlainText",
+              "content": "Certo! Vamos solicitar que um dos nossos colaboradores entre em contato o mais rápido possível. Até a próxima!"
+            }
+          ]
+        }
+      },
+      {
+        "name": "StartConversationIntent",
+        "version": "4",
+        "fulfillmentActivity": {
+          "type": "ReturnIntent"
+        },
+        "sampleUtterances": [
+          "Olá",
+          "Oi",
+          "Hey"
+        ],
+        "slots": [],
+        "conclusionStatement": {
+          "messages": [
+            {
+              "groupNumber": 1,
+              "contentType": "PlainText",
+              "content": "Olá, eu sou o Octank Bot! Como posso te ajudar?"
+            }
+          ]
+        }
+      },
+      {
+        "name": "ChattyIntent",
+        "version": "2",
+        "fulfillmentActivity": {
+          "type": "ReturnIntent"
+        },
+        "sampleUtterances": [
+          "Tudo bem",
+          "Como vai"
+        ],
+        "slots": [],
+        "conclusionStatement": {
+          "messages": [
+            {
+              "groupNumber": 1,
+              "contentType": "PlainText",
+              "content": "Tudo bem! E você? Como posso lhe ajudar?"
+            }
+          ]
+        }
+      },
+      {
+        "name": "PersonalDataIntent",
+        "version": "3",
+        "fulfillmentActivity": {
+          "type": "ReturnIntent"
+        },
+        "sampleUtterances": [
+          "Meu nome é {nome} e seguro é {numseguro}",
+          "{nome}",
+          "{numseguro}",
+          "Meu nome {nome}",
+          "Numero do seguro {numseguro}",
+          "{nome} {numseguro}"
+        ],
+        "slots": [
+          {
+            "sampleUtterances": [],
+            "slotType": "AMAZON.US_FIRST_NAME",
+            "obfuscationSetting": "NONE",
+            "slotConstraint": "Required",
+            "valueElicitationPrompt": {
+              "messages": [
+                {
+                  "contentType": "PlainText",
+                  "content": "Qual seu nome?"
+                }
+              ],
+              "maxAttempts": 2
+            },
+            "priority": 1,
+            "name": "nome"
+          },
+          {
+            "sampleUtterances": [],
+            "slotType": "AMAZON.NUMBER",
+            "obfuscationSetting": "NONE",
+            "slotConstraint": "Required",
+            "valueElicitationPrompt": {
+              "messages": [
+                {
+                  "contentType": "PlainText",
+                  "content": "Qual seu número de seguro?"
+                }
+              ],
+              "maxAttempts": 2
+            },
+            "priority": 2,
+            "name": "numseguro"
+          }
+        ],
+        "conclusionStatement": {
+          "messages": [
+            {
+              "groupNumber": 1,
+              "contentType": "PlainText",
+              "content": "Certo {nome}! Poderia enviar a imagem do acidente? (Para que eu possa fazer uma análise mais correta, tente enviar um foto com a melhor qualidade possível)"
+            }
+          ]
+        }
+      },
+      {
+        "name": "ReportCrashIntent",
+        "version": "2",
+        "fulfillmentActivity": {
+          "type": "ReturnIntent"
+        },
+        "sampleUtterances": [
+          "Queria reportar um acidente",
+          "Gostaria de reportar um incidente"
+        ],
+        "slots": [],
+        "conclusionStatement": {
+          "messages": [
+            {
+              "groupNumber": 1,
+              "contentType": "PlainText",
+              "content": "Entendido! Pra podermos prosseguir, poderia me informar seu nome e número de seguro?"
+            }
+          ]
+        }
+      },
+      {
+        "name": "TestIntent",
+        "version": "3",
+        "fulfillmentActivity": {
+          "type": "ReturnIntent"
+        },
+        "sampleUtterances": [
+          "Teste"
+        ],
+        "slots": [],
+        "conclusionStatement": {
+          "messages": [
+            {
+              "groupNumber": 1,
+              "contentType": "PlainText",
+              "content": "Resposta de teste"
+            }
+          ]
+        }
+      }
+    ],
+    "voiceId": "0",
+    "childDirected": false,
+    "locale": "en-US",
+    "idleSessionTTLInSeconds": 600,
+    "clarificationPrompt": {
+      "messages": [
+        {
+          "contentType": "PlainText",
+          "content": "Poderia repetir por favor?"
+        }
+      ],
+      "maxAttempts": 2
+    },
+    "abortStatement": {
+      "messages": [
+        {
+          "contentType": "PlainText",
+          "content": "Desculpa, não consegui entender. O chat vai encerrar."
+        }
+      ]
+    },
+    "detectSentiment": true,
+    "nluIntentConfidenceThreshold": 0.4,
+    "enableModelImprovements": true
+  }
+}
